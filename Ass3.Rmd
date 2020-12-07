@@ -1,0 +1,338 @@
+---
+title: "Ass3"
+author: "Simba"
+date: "12/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(censusapi)
+library(ggplot2)
+library(tidycensus)
+
+
+# Add key to .Renviron
+Sys.setenv(CENSUS_KEY="1602bbae491dd362ba599b889ae9c3421d56c72c")
+```
+
+
+1. Data selection
+
+For this Assignment, I wish to conduct some recessional analysis of divorce rate regarding the impact of income and other parameters. In this section, 5-year ACS and PUMAS data of 2018 are extracted to examine the potential of using divorce profile as the subject of study. 
+
+```{r}
+acs_vars_2018_5yr <-
+  listCensusMetadata(
+    name = "2018/acs/acs5",
+    type = "variables"
+  )
+
+pums_vars_2018 <- 
+  pums_variables %>%
+  filter(year == 2018, survey == "acs5")
+```
+By observing the ACS variable table, two relevant variables was identified as "B12002" for SEX BY MARITAL STATUS BY AGE FOR THE POPULATION 15 YEARS AND OVER. The following analysis extracted the percentage of divorced people in each tract of the bay area, as well as the percentage of white people to explore the potential relationship between the two. Per required by the assignment, the PUMAS data was also examined for related variables. It was found that the marital status was also a measure that was conducted at a person level in the PUMS data, for which regression analyses regarding the impact of income level and other variables can be explored as well. 
+
+```{r}
+#acs data for dirvorced ppl in bay area, and per_white 
+bay_divorce_race_tract <- 
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2018,
+    region = "tract:*",
+    regionin = "state:06+county:001,013,041,055,075,081,085,095,097",
+    vars = c(
+      "B12002_001E",
+      "B12002_080E",
+      "B12002_095E",
+      "B12002A_001E",
+      "B12002A_007E",
+      "B12002A_013E"
+    )  ) %>% 
+  transmute(
+    tract = paste0(state, county, tract),
+    perc_white = B12002A_001E / B12002_001E,
+    perc_divorced = (B12002_080E + B12002_095E) / B12002_001E
+  ) %>% 
+  filter(
+    !is.na(perc_white), 
+    !is.na(perc_divorced))
+
+#regressional line 
+ggplot(
+  data = bay_divorce_race_tract,
+  aes(
+      x = perc_white,
+      y = perc_divorced
+    )
+) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+```{r}
+model <- lm(perc_divorced ~ perc_white, bay_divorce_race_tract)
+
+summary(model)
+```
+
+From a simple single variable independent variable, there is no significant relationship between the divorce rate and the percentage of white people observed, although slightly mentioned in some articles including https://www.bls.gov/opub/mlr/2013/article/marriage-and-divorce-patterns-by-gender-race-and-educational-attainment.htm. 
+
+Now we proceed to PUMS data at individual level to explore if there is any tendency of divorce percentage with changes in income level and education level. For our purpose of interest, a brief literature review was conducted and three common parameters are taken as the subjects of review here: existence of children, income(https://www.cnbc.com/2018/10/10/being-rich-may-increase-your-odds-of-divorce.html), and education level(mentioned in https://www.pewresearch.org/fact-tank/2015/12/04/education-and-marriage/). The study of the impact of existence of children comes from personal experience of going through my parents' divorce. I found myself being such a concern when it comes to divorce and my parents waited until I turned 18 to start their divorce negotiation. Therefore, I am curious about whether the existence of children would also have an impact on the percentage of people getting a divorce here in the bay area. 
+
+There three factors are represented by the three entries provided in the PUMS data by "PAOC", "WAGP", and "SCHL" respectively at the personal level. 
+
+```{r}
+ca_pums_3 <- get_pums(
+  variables = c(
+    "PUMA",
+    "NP",
+    "MAR",
+    "PAOC",
+    "WAGP",
+    "SCHL"
+  ),
+  state = "CA",
+  year = 2018,
+  survey = "acs5",
+  recode = T
+)
+
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names)
+
+bay_puma <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_pums_3 <-
+  ca_pums_3 %>% 
+  filter(PUMA %in% bay_puma$PUMACE10)
+```
+
+2. Organization of PUMS data 
+
+Here, after key parameters are extracted from the PUMS data, there parameters are converted to percentages of the selected population and saved in the data frame of bay_divorce_pums. 
+```{r}
+bay_divorce_pums <-
+  bay_pums_3 %>% 
+  filter(!duplicated(SERIALNO)) %>% 
+  mutate(
+    divorced = ifelse(
+      (MAR_label == "Divorced"),
+      PWGTP,
+      0
+    ) )%>% 
+  mutate(beyond_bach = ifelse(
+      (SCHL_label %in% c("Bachelor's degree", "Master's degree","Professional degree beyond a bachelor's degree","Doctorate degree")),
+      PWGTP,
+      0)) %>% 
+  mutate(beyond_250K = ifelse(
+      (WAGP>25000),
+      PWGTP,
+      0)) %>% 
+  mutate(with_kids = ifelse(
+      (PAOC != "b"),
+      PWGTP,
+      0)) %>% 
+  group_by(PUMA) %>% 
+  summarize(
+    perc_divorced =
+      sum(divorced, na.rm =T)/sum(PWGTP, na.rm = T),
+    perc_high_edu =
+      sum(beyond_bach, na.rm =T)/sum(PWGTP, na.rm = T),
+    perc_withkids =
+      sum(with_kids, na.rm =T)/sum(PWGTP, na.rm = T),
+     perc_higher250K =
+      sum(beyond_250K, na.rm =T)/sum(PWGTP, na.rm = T)
+  )
+
+```
+
+3. Multiple Regression 
+```{r}
+library(corrplot)
+
+correlationplot <- bay_divorce_pums %>% 
+  select(
+    perc_higher250K,
+    perc_withkids, 
+    perc_high_edu,
+    perc_divorced
+  ) %>% 
+  cor()
+
+corrplot(
+  correlationplot, 
+  method = "number",
+  type = "upper"
+)
+```
+The correlation plot above summarizes the correlation coefficients of the three selected parameters. 
+
+Income: the article mentioned above suggested that people with higher income have a higher possibility to get divorced, while on the contrary, this analysis shows a negative correlation of percentage of people with income higher than 250K on the percentage of divorce in the Bay Area. With the linear regression conducted below, it can be observed that  there is a clear trend that with higher percentage of high income population, it is less likely to observe high divorced percentages. However, this can not be concluded as a causation since higher income can also potentially lead to other features such as higher education, that might be more direct causes of changes in divorced percentages. 
+
+```{r}
+ggplot(
+  data = bay_divorce_pums,
+  aes(
+      x = perc_higher250K,
+      y = perc_divorced
+    )
+) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+Existence of Kids: besides the trend of upward, it is observed that the linear regression of the existence of children has a relatively high residual error margin. This can also be observed from the outliers in the chart. Therefore a causation should again not be concluded. 
+```{r}
+ggplot(
+  data = bay_divorce_pums,
+  aes(
+      x = perc_withkids,
+      y = perc_divorced
+    )
+) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+model <- lm(perc_divorced ~ perc_withkids, bay_divorce_pums)
+
+summary(model)
+```
+
+Education Level: the article above suggested that people with higher education levels tend to have longer-term relationships, which agrees with the results drawn here. The correlation plot indicated a negative relationship. But the scatter plot below exhibits that the data points here are relatively scattered. At the same time, the correlation coefficient is also small. Therefore, though the sample of bay area does suggest a negative correlation between the divorced percentage and the percentage of the people with higher than bachelor degrees, no causation should be concluded either. 
+```{r}
+ggplot(
+  data = bay_divorce_pums,
+  aes(
+      x = perc_high_edu,
+      y = perc_divorced
+    )
+) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+model <- lm(perc_divorced ~ perc_high_edu, bay_divorce_pums)
+
+summary(model)
+
+```
+
+After reviewing the regression of the three subject matters, it should also be noted that for a better understanding of the correlation between these social parameters and the divorced percentage of the population, more analysis at the individual level can be potentially conducted, such as the percentage of the people who possess a high education and also divorced. These intersectional percentages can be used as good indicators of the correlations of these parameters as well. 
+
+
+4. Another Regression 
+Following the investigation of the families in the Bay Area, I would like to further explore the potential factors for the number of children at the housing level, specifically the ability to speak English (which can be an indirect indicator of the race of the household) and income. The previous steps are followed for this new analysis. 
+
+```{r}
+ca_pums_4 <- get_pums(
+  variables = c(
+    "PUMA",
+    "NOC",
+    "LNGI",
+    "FINCP"
+  ),
+  state = "CA",
+  year = 2018,
+  survey = "acs5",
+  recode = T
+)
+
+bay_pums_4 <-
+  ca_pums_4 %>% 
+  filter(PUMA %in% bay_puma$PUMACE10)
+
+```
+```{r}
+bay_numkids <-
+  bay_pums_4 %>% 
+  filter(!duplicated(SERIALNO)) %>% 
+  mutate(
+    morethan3 = ifelse(
+      (NOC>2),
+      WGTP,
+      0
+    ) )%>% 
+  mutate(english = ifelse(
+      (LNGI_label == "No one in the household 14 and over speaks English only or speaks English 'very well'"),
+      WGTP,
+      0)) %>% 
+  mutate(higher100k = ifelse(
+      (FINCP>25000),
+      WGTP,
+      0)) %>% 
+  group_by(PUMA) %>% 
+  summarize(
+    perc_morethan3 =
+      sum(morethan3, na.rm =T)/sum(PWGTP, na.rm = T),
+    perc_english =
+      sum(english, na.rm =T)/sum(PWGTP, na.rm = T),
+    perc_higher100k =
+      sum(higher100k, na.rm =T)/sum(PWGTP, na.rm = T)
+  )
+```
+
+```{r}
+library(corrplot)
+
+correlationplot <- bay_numkids %>% 
+  select(
+    perc_higher100k,
+    perc_english, 
+    perc_morethan3
+  ) %>% 
+  cor()
+
+corrplot(
+  correlationplot, 
+  method = "number",
+  type = "upper")
+```
+By studying the correlation coefficient of the three parameters, no significant correlation between the ability of the household to communicate in English on the possibility of having more than three kids was observed. But a positive correlation between the income of the household and the tendency to have more than 3 kids. A single variable regression is attached as below. Since a fair number of outliers can be observed here. 
+
+```{r}
+ggplot(
+  data = bay_numkids,
+  aes(
+      x = perc_higher100k,
+      y = perc_morethan3
+    )
+) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+
+
+
